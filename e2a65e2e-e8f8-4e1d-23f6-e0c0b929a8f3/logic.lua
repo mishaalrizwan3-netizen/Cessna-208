@@ -1854,70 +1854,74 @@ end)
 -- =========================
 local function fuel_logic()
     -- Isolated Check: ONLY rely on the hardware switch position. 
-    -- We removed pump_state and engine_on so it ignores the aircraft's internal state.
     if boost_switch == nil then return end
 
+    local is_engine_running = (live_ng_value ~= nil and live_ng_value >= 46.0)
+    local pump_active = false
+    local calculated_psi = 0.0
+
     -- =========================
-    -- 1. DETERMINE PUMP STATE (Joystick & Ng Driven)
+    -- 1. DETERMINE PUMP STATE & PRESSURE
     -- =========================
-    local should_pump_be_on = false
-    
     if boost_switch == 2 then
-        -- Position 2: Manual ON (Force Pump ON)
-        should_pump_be_on = true
+        -- Position 2: Manual ON
+        pump_active = true
+        if is_engine_running then
+            calculated_psi = 10.0
+        else
+            calculated_psi = 4.75 -- Per your rules, manual ON with engine off gives 4.75 PSI
+        end
+
     elseif boost_switch == 1 then
         -- Position 1: NORM (Auto Mode)
-        -- User: "when ng is less than 46% fuel boost will automatically turn on on normal position"
-        if live_ng_value ~= nil and live_ng_value < 46.0 then
-            should_pump_be_on = true
+        if is_engine_running then
+            -- Engine pump provides 10 PSI, boost pump stays OFF
+            pump_active = false
+            calculated_psi = 10.0
         else
-            should_pump_be_on = false
+            -- Engine below 46%, auto-boost kicks in at 4.75 PSI
+            pump_active = true
+            calculated_psi = 4.75 
         end
+
     else
-        -- Position 0: OFF (Force Pump OFF)
-        should_pump_be_on = false
+        -- Position 0: OFF
+        pump_active = false
+        if is_engine_running then
+            -- Engine pump provides 10 PSI even if boost is OFF
+            calculated_psi = 10.0
+        else
+            -- Nothing is pumping, pressure is dead
+            calculated_psi = 0.0
+        end
     end
 
     -- =========================
-    -- 2. DYNAMIC PRESSURE CALCULATION (100% Custom)
+    -- 2. APPLY PRESSURE TO SIM & LOCAL STATE
     -- =========================
-    local calculated_psi = 0
-    
-    if should_pump_be_on then
-        -- Default active pressure
-        calculated_psi = 4.75
-    end
-    
-    -- User: "when the ng reaches 46% fuel pressure will go to 10 psi.when fuel boost switch is in on position"
-    if should_pump_be_on and live_ng_value ~= nil and live_ng_value >= 46.0 then
-        calculated_psi = 10.0
-    end
-    
-    -- Update the custom L-Var and our local logic variable
     if fsx_variable_write and calculated_psi ~= fuel_press then
         pcall(fsx_variable_write, "L:C208_CUSTOM_FUEL_PRESS", "Number", calculated_psi)
     end
     fuel_press = calculated_psi
 
     -- =========================
-    -- 3. CAS WARNINGS & UI (Strictly driven by custom pressure)
+    -- 3. UI TEXT & COLORS
     -- =========================
-    local boost_active = should_pump_be_on
-    fuel_boost_on = boost_active
-    light_on[13] = fuel_boost_on
-
     local txt_boost = ""
-    local boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;" -- NORM
+    local boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;" -- NORM default
     
-    if (boost_switch == 1 and boost_active) then
+    if boost_switch == 1 and pump_active then
         txt_boost = "AUTO ON"
         boost_color = "size:12; color:rgb(255,255,180); halign:center; valign:center;"
-    elseif boost_active then
+    elseif pump_active then
         txt_boost = "ON"
         boost_color = "size:12; color:rgb(180,255,180); halign:center; valign:center;"
     else
-        txt_boost = "NORM"
-        boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;"
+        if boost_switch == 0 then
+            txt_boost = "OFF"
+        else
+            txt_boost = "NORM"
+        end
     end
 
     if txt_cas_fuel then 
@@ -1925,24 +1929,31 @@ local function fuel_logic()
         txt_style(txt_cas_fuel, boost_color) 
     end
 
-    -- Update CAS Annunciators
+    -- =========================
+    -- 4. CAS WARNINGS
+    -- =========================
+    fuel_boost_on = pump_active
+    light_on[13] = fuel_boost_on
+
     if battery_switch_on then
-        -- User: "fuel pressure low warning will only show if the presure is less than 4.75psi"
-        cas_fictitious[3] = (fuel_press < 4.75) and 1 or 0  -- FUEL PRESS LOW
-        cas_fictitious[6] = boost_active and 1 or 0        -- FUEL BOOST ON
+        -- FUEL PRESS LOW: Only show if strictly less than 4.75 (so 4.75 will NOT trigger it)
+        cas_fictitious[3] = (fuel_press < 4.75) and 1 or 0  
+        
+        -- FUEL BOOST ON: Show whenever the pump is actively running
+        cas_fictitious[6] = pump_active and 1 or 0        
     else
         cas_fictitious[3] = 0
         cas_fictitious[6] = 0
     end
 
     if apply_light_load_to_electrical then apply_light_load_to_electrical() end
-    write_cas_lvars()
+    if write_cas_lvars then write_cas_lvars() end
 
     print(string.format("CUSTOM FUEL LOGIC -> PRESS: %.2f PSI | BOOST: %s | SWITCH: %d | NG: %.1f", 
-        fuel_press or 0, boost_active and "ON" or "OFF", boost_switch or 0, live_ng_value or 0))
+        fuel_press or 0, pump_active and "ON" or "OFF", boost_switch or 0, live_ng_value or 0))
     
-    -- Optional: Attempt to sync simulator strictly as a fallback (does not affect logic)
-    if should_pump_be_on then
+    -- Sync simulator event (optional fallback)
+    if pump_active then
         pcall(fsx_event, "FUEL_PUMP1_ON")
     else
         pcall(fsx_event, "FUEL_PUMP1_OFF")
@@ -1971,8 +1982,9 @@ fsx_variable_subscribe("L:ASD_SWITCH_STARTER_CE208EX", "Number", function(v)
     
     -- Auto-enable physical aircraft ignition when starter turns ON
     if starter_switch_on then
-        -- We blindly fire the toggle to turn the sim's ignition ON, 
-        -- assuming it is currently off.
+        -- The user confirmed TURBINE_IGNITION_SWITCH_TOGGLE previously worked perfectly.
+        -- We removed the `if not ignition_switch_on` safeguard because the joystick 
+        -- switch is no longer wired to the sim, meaning the sim's ignition is always OFF.
         pcall(fsx_event, "TURBINE_IGNITION_SWITCH_TOGGLE")
         ignition_auto_enabled_by_starter = true
     else
