@@ -3,8 +3,7 @@
 --=============================================================================
 -- This script handles everything from engine gauges to the clickable button 
 -- panel (Battery, GEN, ALT, etc.). It supports two instances in one panel:
---   Instance A: Side panel + Button panel (Main)
---   Instance B: Side panel only (Remote)
+--   Single-instance side panel instrument
 --=============================================================================
 -- 0. GLOBAL API SAFEGUARDS (Prevents "Argument 3 is nil" crashes)
 --=============================================================================
@@ -41,26 +40,10 @@ end
 --=============================================================================
 -- 1. BACKGROUND AND NEEDLES SETUP
 --=============================================================================
--- Panel visibility: driven only by L:PANEL_VISIBLE (0 = hidden, 1 = visible).
--- We run this SAME script twice (two instances) in one Air Manager panel:
---   Instance A: shows when L:PANEL_VISIBLE == 1 (the "main" with button panel)
---   Instance B: shows when L:PANEL_VISIBLE == 0 (the "remote" without button panel)
-local my_instance = "A"
-if si_variable_create then
-    local ok, id = pcall(si_variable_create, "C208_SIDE_INSTANCE_A_CLAIMED", "BOOL", false)
-    if ok and id ~= nil then
-        local claimed = si_variable_read and si_variable_read(id) or false
-        if not claimed then
-            if si_variable_write then pcall(si_variable_write, id, true) end
-            my_instance = "A"
-        else
-            my_instance = "B"
-        end
-    end
-end
+-- Panel visibility: single-instance instrument.
+-- Visible when L:PANEL_VISIBLE == 1, hidden when == 0.
 local function am_i_visible(lpanel_value)
-    if my_instance == "A" then return lpanel_value == 1
-    else return lpanel_value == 0 end
+    return lpanel_value == 1
 end
 local current_lpanel_visible = 1
 local panel_visible = am_i_visible(current_lpanel_visible)
@@ -209,8 +192,7 @@ local OVERLAY_LINE_HEIGHT = 18
 local OVERLAY_SPACING = 2
 
 -- Store current values for restoration when overlay is hidden
-local current_bat_amps = 0
-local current_bus_volts = 0.0
+-- Use the live globals current_bat_amps / current_bus_volts defined earlier in the file.
 
 img_overlay_bg = img_add("overlay.png", -200, OVERLAY_START_Y, 143, 300)
 local has_overlay_bg = img_overlay_bg ~= nil  -- overlay image is optional; guard all uses
@@ -315,12 +297,22 @@ function apply_overlay_state()
     end
 end
 
+local si_overlay_visible = nil
+
+local function set_overlay_state(new_state, write_back)
+    overlay_visible = (new_state == true or new_state == 1)
+    apply_overlay_state()
+    if si_overlay_visible and si_variable_write then
+        pcall(si_variable_write, si_overlay_visible, overlay_visible)
+    end
+    if write_back ~= false and fsx_variable_write then
+        pcall(fsx_variable_write, "L:C208_OVERLAY_VISIBLE", "Number", overlay_visible and 1 or 0)
+    end
+end
+
 -- Toggle overlay logical state and re-apply visuals
 function toggle_overlay()
-    overlay_visible = not overlay_visible
-    apply_overlay_state()
-    if si_overlay_visible then si_variable_write(si_overlay_visible, overlay_visible) end
-    fsx_variable_write("L:C208_OVERLAY_VISIBLE", "Bool", overlay_visible)
+    set_overlay_state(not overlay_visible, true)
 end
 
 -- Button to toggle overlay (click PROP RPM area)
@@ -332,11 +324,10 @@ button_add(nil, nil, 95, 280, 40, 24,
 )
 
 --=============================================================================
--- PANEL VISIBILITY — toggle view of main and remote (driven by L:PANEL_VISIBLE)
+-- PANEL VISIBILITY — driven by L:PANEL_VISIBLE
 --=============================================================================
--- Main (Instance A) visible when L:PANEL_VISIBLE == 1. Remote (Instance B) when == 0.
+-- Visible when L:PANEL_VISIBLE == 1, hidden when == 0.
 -- Toggle via: click top-left 40x40, BU0836X button 1, or L:PANEL_VISIBLE write.
--- Both instruments must be in the SAME Air Manager panel to sync.
 -- Apply current panel_visible state to visuals (show or move all images/text off-screen)
 function apply_panel_visibility()
     if panel_visible then
@@ -511,83 +502,11 @@ end
 --=============================================================================
 -- BU0836X JOYSTICK BUTTON SUPPORT
 --=============================================================================
--- Support for BU0836X interface button to toggle overlay
-print("Registering BU0836X JOYSTICK BUTTON for overlay toggle...")
+-- Disabled here on purpose.
+-- Softkey handling is now event-based only through the dedicated
+-- G1000 softkey handlers near the end of the script.
+-- This avoids duplicate registrations and double-toggles in panel mode.
 
--- Method 1: Direct hardware button (if Air Manager detects BU0836X as joystick)
--- The BU0836X typically appears as JOYSTICK_1, JOYSTICK_2, etc. in Air Manager
--- Check Air Manager Hardware tab to find your joystick ID
--- Button numbers start from 0 (BUTTON_0, BUTTON_1, BUTTON_2, etc.)
-
--- Uncomment and modify ONE of these lines with your button number:
--- Replace BUTTON_0 with your desired button (BUTTON_1, BUTTON_2, etc.)
--- Replace JOYSTICK_1 with your actual joystick ID if different
-
--- Example for button 1 on joystick 1:
--- hw_button_add("JOYSTICK_1_BUTTON_1", function() toggle_overlay() end)
-
--- Example for button 5 on joystick 1:
--- hw_button_add("JOYSTICK_1_BUTTON_5", function() toggle_overlay() end)
-
--- Try to auto-detect common joystick IDs
--- In Air Manager 5, check Hardware tab to find your BU0836X joystick ID
-local joystick_detected = false
-
--- Method: Try common joystick IDs and button numbers
--- You can modify these to match your setup
-local joystick_ids = {"JOYSTICK_1", "JOYSTICK_2", "JOYSTICK_3"}
-local button_numbers = {0, 1, 2, 3, 4, 5}  -- Try buttons 0-5
-
-for _, joy_id in ipairs(joystick_ids) do
-    if not joystick_detected then
-        for _, btn_num in ipairs(button_numbers) do
-            local success, err = pcall(function()
-                if hw_button_add then
-                    local button_id = joy_id .. "_BUTTON_" .. btn_num
-                    hw_button_add(button_id, function() toggle_overlay() end)
-                    print("BU0836X: Successfully registered " .. button_id)
-                    joystick_detected = true
-                    return true
-                end
-            end)
-            if success and joystick_detected then
-                break
-            end
-        end
-    end
-end
-
-if not joystick_detected then
-    print("BU0836X: Direct hardware button not auto-detected")
-    print("BU0836X: Use Air Manager 5 Hardware tab to configure:")
-    print("BU0836X:   1. Go to Hardware tab")
-    print("BU0836X:   2. Find your BU0836X joystick")
-    print("BU0836X:   3. Add button and set it to write L:OverlayToggleButton = 1")
-    print("BU0836X: Or manually uncomment/modify hw_button_add line below")
-    
-    -- Manual setup - uncomment and modify this line with your joystick ID and button:
-    -- hw_button_add("JOYSTICK_1_BUTTON_1", function() toggle_overlay() end)
-end
-
--- Method 2: L-variable subscription (works with FSUIPC or other systems)
--- FSUIPC can map BU0836X button to write to L:OverlayToggleButton
-local last_button_state = 0
-fsx_variable_subscribe("L:OverlayToggleButton", "Number",
-    function(button_value)
-        if button_value == nil or button_value ~= button_value then return end
-        
-        -- Detect button press (transition from 0 to non-zero)
-        if button_value ~= nil and button_value ~= 0 and last_button_state == 0 then
-            toggle_overlay()
-            -- Reset the button state to allow next press
-            fsx_variable_write("L:OverlayToggleButton", "Number", 0)
-        end
-        
-        last_button_state = button_value or 0
-    end
-)
-print("BU0836X: L-variable method ready - map button to L:OverlayToggleButton in FSUIPC")
-print("BU0836X: In FSUIPC Buttons tab, assign button to write 1 to L:OverlayToggleButton")
 
 -- Oil Pressure digital display
 txt_oil_pres = txt_add("0", "size:20; color: white; halign:right;", 95, 315, 40, 24)
@@ -1854,74 +1773,71 @@ end)
 -- =========================
 local function fuel_logic()
     -- Isolated Check: ONLY rely on the hardware switch position. 
+    -- We removed pump_state and engine_on so it ignores the aircraft's internal state.
     if boost_switch == nil then return end
 
-    local is_engine_running = (live_ng_value ~= nil and live_ng_value >= 46.0)
-    local pump_active = false
-    local calculated_psi = 0.0
-
     -- =========================
-    -- 1. DETERMINE PUMP STATE & PRESSURE
+    -- 1. DETERMINE PUMP STATE (Joystick & Ng Driven)
     -- =========================
+    local should_pump_be_on = false
+    
     if boost_switch == 2 then
-        -- Position 2: Manual ON
-        pump_active = true
-        if is_engine_running then
-            calculated_psi = 10.0
-        else
-            calculated_psi = 4.75 -- Per your rules, manual ON with engine off gives 4.75 PSI
-        end
-
+        -- Position 2: Manual ON (Force Pump ON)
+        should_pump_be_on = true
     elseif boost_switch == 1 then
         -- Position 1: NORM (Auto Mode)
-        if is_engine_running then
-            -- Engine pump provides 10 PSI, boost pump stays OFF
-            pump_active = false
-            calculated_psi = 10.0
+        -- User: "when ng is less than 46% fuel boost will automatically turn on on normal position"
+        if live_ng_value ~= nil and live_ng_value < 46.0 then
+            should_pump_be_on = true
         else
-            -- Engine below 46%, auto-boost kicks in at 4.75 PSI
-            pump_active = true
-            calculated_psi = 4.75 
+            should_pump_be_on = false
         end
-
     else
-        -- Position 0: OFF
-        pump_active = false
-        if is_engine_running then
-            -- Engine pump provides 10 PSI even if boost is OFF
-            calculated_psi = 10.0
-        else
-            -- Nothing is pumping, pressure is dead
-            calculated_psi = 0.0
-        end
+        -- Position 0: OFF (Force Pump OFF)
+        should_pump_be_on = false
     end
 
     -- =========================
-    -- 2. APPLY PRESSURE TO SIM & LOCAL STATE
+    -- 2. DYNAMIC PRESSURE CALCULATION (100% Custom)
     -- =========================
+    local calculated_psi = 0
+    
+    if should_pump_be_on then
+        -- Default active pressure from the auxiliary boost pump
+        calculated_psi = 4.75
+    end
+    
+    -- When Ng >= 46%, the engine-driven pump supplies sufficient pressure (10 PSI),
+    -- hiding the FUEL PRESS LOW warning even if the boost pump is OFF.
+    if live_ng_value ~= nil and live_ng_value >= 46.0 then
+        calculated_psi = 10.0
+    end
+    
+    -- Update the custom L-Var and our local logic variable
     if fsx_variable_write and calculated_psi ~= fuel_press then
         pcall(fsx_variable_write, "L:C208_CUSTOM_FUEL_PRESS", "Number", calculated_psi)
     end
     fuel_press = calculated_psi
 
     -- =========================
-    -- 3. UI TEXT & COLORS
+    -- 3. CAS WARNINGS & UI (Strictly driven by custom pressure)
     -- =========================
+    local boost_active = should_pump_be_on
+    fuel_boost_on = boost_active
+    light_on[13] = fuel_boost_on
+
     local txt_boost = ""
-    local boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;" -- NORM default
+    local boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;" -- NORM
     
-    if boost_switch == 1 and pump_active then
+    if (boost_switch == 1 and boost_active) then
         txt_boost = "AUTO ON"
         boost_color = "size:12; color:rgb(255,255,180); halign:center; valign:center;"
-    elseif pump_active then
+    elseif boost_active then
         txt_boost = "ON"
         boost_color = "size:12; color:rgb(180,255,180); halign:center; valign:center;"
     else
-        if boost_switch == 0 then
-            txt_boost = "OFF"
-        else
-            txt_boost = "NORM"
-        end
+        txt_boost = "NORM"
+        boost_color = "size:12; color:rgb(255,180,180); halign:center; valign:center;"
     end
 
     if txt_cas_fuel then 
@@ -1929,31 +1845,24 @@ local function fuel_logic()
         txt_style(txt_cas_fuel, boost_color) 
     end
 
-    -- =========================
-    -- 4. CAS WARNINGS
-    -- =========================
-    fuel_boost_on = pump_active
-    light_on[13] = fuel_boost_on
-
+    -- Update CAS Annunciators
     if battery_switch_on then
-        -- FUEL PRESS LOW: Only show if strictly less than 4.75 (so 4.75 will NOT trigger it)
-        cas_fictitious[3] = (fuel_press < 4.75) and 1 or 0  
-        
-        -- FUEL BOOST ON: Show whenever the pump is actively running
-        cas_fictitious[6] = pump_active and 1 or 0        
+        -- User: "fuel pressure low warning will only show if the presure is less than 4.75psi"
+        cas_fictitious[3] = (fuel_press < 4.75) and 1 or 0  -- FUEL PRESS LOW
+        cas_fictitious[6] = boost_active and 1 or 0        -- FUEL BOOST ON
     else
         cas_fictitious[3] = 0
         cas_fictitious[6] = 0
     end
 
     if apply_light_load_to_electrical then apply_light_load_to_electrical() end
-    if write_cas_lvars then write_cas_lvars() end
+    write_cas_lvars()
 
     print(string.format("CUSTOM FUEL LOGIC -> PRESS: %.2f PSI | BOOST: %s | SWITCH: %d | NG: %.1f", 
-        fuel_press or 0, pump_active and "ON" or "OFF", boost_switch or 0, live_ng_value or 0))
+        fuel_press or 0, boost_active and "ON" or "OFF", boost_switch or 0, live_ng_value or 0))
     
-    -- Sync simulator event (optional fallback)
-    if pump_active then
+    -- Optional: Attempt to sync simulator strictly as a fallback (does not affect logic)
+    if should_pump_be_on then
         pcall(fsx_event, "FUEL_PUMP1_ON")
     else
         pcall(fsx_event, "FUEL_PUMP1_OFF")
@@ -2358,7 +2267,9 @@ local function create_bu0836x_master_handler(controller_name)
         if index == 0 then
             if last_overlay_button_state ~= value then
                 last_overlay_button_state = value
-                toggle_overlay()
+                if value == 1 or value == true then
+                    if press_mfd_softkey_1 then press_mfd_softkey_1() end
+                end
             end
             return
         end
@@ -2367,7 +2278,9 @@ local function create_bu0836x_master_handler(controller_name)
         if index == 1 then
             if last_panel_button_state ~= value then
                 last_panel_button_state = value
-                toggle_panel_visible()
+                if value == 1 or value == true then
+                    if press_mfd_softkey_12 then press_mfd_softkey_12() end
+                end
             end
             return
         end
@@ -2442,58 +2355,62 @@ fsx_variable_subscribe("L:PANEL_VISIBLE", "Number", function(val)
     apply_panel_visibility()
 end)
 
--- Initial state & sync: only Instance A (main) drives L: vars and shows on load.
-if my_instance == "A" then
-    fsx_variable_write("L:PANEL_VISIBLE", "Number", 1)
-    apply_panel_visibility()
-    if timer_start and fsx_variable_write then
-        timer_start(300, function()
-            pcall(fsx_variable_write, "L:C208_BATTERY_SWITCH", "Number", battery_switch_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_GEN_SWITCH", "Number", gen_switch_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_ALT_SWITCH", "Number", alt_switch_on and 1 or 0)
-            pcall(fsx_variable_write, "L:ASD_SWITCH_FUEL_AUXBP", "Number", boost_switch or 0)
-            pcall(fsx_variable_write, "L:C208_STARTER_ON", "Number", starter_switch_on and 1 or 0)
-            -- (Removed invalid ignition event-write)
-            pcall(fsx_variable_write, "L:LeftTank1", "Number", fuel_tank_left_on and 1 or 0)
-            pcall(fsx_variable_write, "L:RightTank1", "Number", fuel_tank_right_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_EMERGENCY_PWR_LEVER", "Number", emergency_power_lever_front and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_TEST_FIRE", "Number", test_fire_detect_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_TEST_FUEL_SEL", "Number", test_fuel_select_off_on and 1 or 0)
-            -- Initialize custom amperage L-variables
-            for i=1, #LIGHTS do
-                if LIGHTS[i].amp_lvar then
-                    pcall(fsx_variable_write, LIGHTS[i].amp_lvar, "Amperes", LIGHTS[i].amps)
-                end
+
+fsx_variable_subscribe("L:C208_OVERLAY_VISIBLE", "Number", function(val)
+    if val == nil then return end
+    set_overlay_state(val == 1 or val == true, false)
+end)
+
+-- Initial state & sync for single-instance operation.
+fsx_variable_write("L:PANEL_VISIBLE", "Number", 1)
+fsx_variable_write("L:C208_OVERLAY_VISIBLE", "Number", overlay_visible and 1 or 0)
+apply_panel_visibility()
+if timer_start and fsx_variable_write then
+    timer_start(300, function()
+        pcall(fsx_variable_write, "L:C208_BATTERY_SWITCH", "Number", battery_switch_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_GEN_SWITCH", "Number", gen_switch_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_ALT_SWITCH", "Number", alt_switch_on and 1 or 0)
+        pcall(fsx_variable_write, "L:ASD_SWITCH_FUEL_AUXBP", "Number", boost_switch or 0)
+        pcall(fsx_variable_write, "L:C208_STARTER_ON", "Number", starter_switch_on and 1 or 0)
+        -- (Removed invalid ignition event-write)
+        pcall(fsx_variable_write, "L:LeftTank1", "Number", fuel_tank_left_on and 1 or 0)
+        pcall(fsx_variable_write, "L:RightTank1", "Number", fuel_tank_right_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_EMERGENCY_PWR_LEVER", "Number", emergency_power_lever_front and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_TEST_FIRE", "Number", test_fire_detect_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_TEST_FUEL_SEL", "Number", test_fuel_select_off_on and 1 or 0)
+        -- Initialize custom amperage L-variables
+        for i=1, #LIGHTS do
+            if LIGHTS[i].amp_lvar then
+                pcall(fsx_variable_write, LIGHTS[i].amp_lvar, "Amperes", LIGHTS[i].amps)
             end
-        end)
-    end
-    timer_start(1500, 1500, function()
-        fsx_variable_write("L:PANEL_VISIBLE", "Number", current_lpanel_visible or 1)
-        if fsx_variable_write then
-            pcall(fsx_variable_write, "L:C208_BATTERY_SWITCH", "Number", battery_switch_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_GEN_SWITCH", "Number", gen_switch_on and 1 or 0)
-            pcall(fsx_variable_write, "L:C208_ALT_SWITCH", "Number", alt_switch_on and 1 or 0)
         end
     end)
-else
-    panel_visible = am_i_visible(current_lpanel_visible)
-    apply_panel_visibility()
 end
+timer_start(1500, 1500, function()
+    fsx_variable_write("L:PANEL_VISIBLE", "Number", current_lpanel_visible or 1)
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:C208_BATTERY_SWITCH", "Number", battery_switch_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_GEN_SWITCH", "Number", gen_switch_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_ALT_SWITCH", "Number", alt_switch_on and 1 or 0)
+    end
+end)
 
 -- BU0836X joystick switch logic is defined above in the master handler block.
 
 -- SI variables for overlay only (optional; L:Var used for panel)
-local si_overlay_visible
 if si_variable_create then
     local ok2, id2 = pcall(si_variable_create, "C208_OVERLAY_VISIBLE", "BOOL", overlay_visible)
     si_overlay_visible = (ok2 and id2) or nil
 end
 
-local controllers = game_controller_list()
-for _, name in pairs(controllers) do
-    if name == BU0836X_INTERFACE_NAME then
-        print("Registering BU0836X master handler on: " .. name)
-        game_controller_add(name, create_bu0836x_master_handler(name))
+do
+    print("Registering controller handler for single instance")
+    local controllers = game_controller_list()
+    for _, name in pairs(controllers) do
+        if name == BU0836X_INTERFACE_NAME then
+            print("Registering BU0836X master handler on: " .. name)
+            game_controller_add(name, create_bu0836x_master_handler(name))
+        end
     end
 end
 
@@ -2759,43 +2676,183 @@ if p3d_variable_subscribe then
     print("Prepar3D: Registered TURB ENG TORQUE, ITT, N1 subscriptions")
 end
 --=============================================================================
--- G1000 SOFTKEY INTEGRATION
+-- G1000 SOFTKEY INTEGRATION (SYNCED LOCAL + EXTERNAL HARDWARE)
 --=============================================================================
--- MFD Softkey 1 (Overlay Toggle)
-fsx_variable_subscribe("L:EFIS_Fly.MFD_SOFTKEY_1", "Number", function(v)
-    if v == 1 then
-        if toggle_overlay then toggle_overlay() end
-        fsx_variable_write("L:EFIS_Fly.MFD_SOFTKEY_1", "Number", 0)
-    end
-end)
+-- IMPORTANT:
+-- 1) Local Air Manager / BU0836X presses use press_mfd_softkey_1() and
+--    press_mfd_softkey_12(), which SEND the EFIS event AND update the panel.
+-- 2) External hardware that already sends the EFIS event must ALSO pulse:
+--      L:C208_MFD_SOFTKEY_1_PULSE  = 1
+--      L:C208_MFD_SOFTKEY_12_PULSE = 1
+--      L:C208_REVERSIONARY_PULSE   = 1   (optional)
+--    This script auto-resets those pulse L:vars back to 0.
+-- 3) No top-level locals are used here, to avoid Lua's local-variable limit.
+--=============================================================================
 
--- MFD Softkey 12 (Panel Visibility Swap)
-fsx_variable_subscribe("L:EFIS_Fly.MFD_SOFTKEY_12", "Number", function(v)
-    if v == 1 then
-        if toggle_panel_visible then toggle_panel_visible() end
-        fsx_variable_write("L:EFIS_Fly.MFD_SOFTKEY_12", "Number", 0)
-    end
-end)
+C208_SOFTKEY1_BUSY = false
+C208_SOFTKEY12_BUSY = false
+C208_REVERSIONARY_BUSY = false
 
--- Reversionary Mode (DISPLAY BACKUP)
--- Sync the panel visibility back to Main when active
-fsx_variable_subscribe("L:EFIS_Fly.AUDIO_ACTIVATE_REVERSIONARY", "Number", function(v)
-    if v == 1 then
-        fsx_variable_write("L:PANEL_VISIBLE", "Number", 1)
-        if apply_panel_visibility then apply_panel_visibility() end
+function c208_sync_overlay_panel_only()
+    if toggle_overlay then
+        toggle_overlay()
     end
-end)
+end
 
--- Support for hardware button callbacks (if defined in Air Manager)
-function press_mfd_softkey_1() fsx_variable_write("L:EFIS_Fly.MFD_SOFTKEY_1", "Number", 1) end
-function press_mfd_softkey_12() fsx_variable_write("L:EFIS_Fly.MFD_SOFTKEY_12", "Number", 1) end
-function activate_reversionary_mode() fsx_variable_write("L:EFIS_Fly.AUDIO_ACTIVATE_REVERSIONARY", "Number", 1) end
+function c208_sync_panel_visibility_only()
+    if toggle_panel_visible then
+        toggle_panel_visible()
+    end
+end
+
+function c208_sync_reversionary_panel_only()
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:PANEL_VISIBLE", "Number", 1)
+    end
+    current_lpanel_visible = 1
+    panel_visible = am_i_visible(current_lpanel_visible)
+    if apply_panel_visibility then
+        apply_panel_visibility()
+    end
+end
+
+function c208_pulse_overlay_sync()
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_1_PULSE", "Number", 1)
+    else
+        c208_sync_overlay_panel_only()
+    end
+end
+
+function c208_pulse_panel_sync()
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_12_PULSE", "Number", 1)
+    else
+        c208_sync_panel_visibility_only()
+    end
+end
+
+function c208_pulse_reversionary_sync()
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:C208_REVERSIONARY_PULSE", "Number", 1)
+    else
+        c208_sync_reversionary_panel_only()
+    end
+end
+
+function c208_handle_overlay_softkey_event()
+    print("SOFTKEY 1 (LOCAL HW) -> EFIS event + direct local toggle")
+    C208_SOFTKEY1_BUSY = true
+    if fsx_event then
+        pcall(fsx_event, "EFIS_Fly.MFD_SOFTKEY_1")
+    end
+    c208_sync_overlay_panel_only()
+    timer_start(50, function()
+        C208_SOFTKEY1_BUSY = false
+    end)
+end
+
+function c208_handle_panel_softkey_event()
+    print("SOFTKEY 12 (LOCAL HW) -> EFIS event + direct local toggle")
+    C208_SOFTKEY12_BUSY = true
+    if fsx_event then
+        pcall(fsx_event, "EFIS_Fly.MFD_SOFTKEY_12")
+    end
+    c208_sync_panel_visibility_only()
+    timer_start(50, function()
+        C208_SOFTKEY12_BUSY = false
+    end)
+end
+
+function c208_handle_reversionary_event()
+    print("REVERSIONARY (LOCAL HW) -> EFIS event + direct local toggle")
+    C208_REVERSIONARY_BUSY = true
+    if fsx_event then
+        pcall(fsx_event, "EFIS_Fly.AUDIO_ACTIVATE_REVERSIONARY")
+    end
+    c208_sync_reversionary_panel_only()
+    timer_start(50, function()
+        C208_REVERSIONARY_BUSY = false
+    end)
+end
+
+function press_mfd_softkey_1()
+    c208_handle_overlay_softkey_event()
+end
+
+function press_mfd_softkey_12()
+    c208_handle_panel_softkey_event()
+end
+
+function activate_reversionary_mode()
+    c208_handle_reversionary_event()
+end
 
 if hw_button_add then
+    print("Registering hardware softkeys for single instance")
     hw_button_add("Softkey 1", press_mfd_softkey_1)
     hw_button_add("Softkey 12", press_mfd_softkey_12)
     hw_button_add("Reversionary Mode", activate_reversionary_mode)
 end
+
+-- External pulse handlers must exist on every loaded instance.
+-- This ensures the overlay handler is always active on the single loaded instance.
+if fsx_variable_write then
+    pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_1_PULSE", "Number", 0)
+    pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_12_PULSE", "Number", 0)
+    pcall(fsx_variable_write, "L:C208_REVERSIONARY_PULSE", "Number", 0)
+end
+
+fsx_variable_subscribe("L:C208_MFD_SOFTKEY_1_PULSE", "Number", function(v)
+    if v == nil then return end
+    if (v ~= 0 and v ~= false) and not C208_SOFTKEY1_BUSY then
+        C208_SOFTKEY1_BUSY = true
+        print("SOFTKEY 1 (EXTERNAL PULSE) -> panel sync only")
+        toggle_overlay()
+
+        if fsx_variable_write then
+            pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_1_PULSE", "Number", 0)
+        end
+
+        timer_start(50, function()
+            C208_SOFTKEY1_BUSY = false
+        end)
+    end
+end)
+
+fsx_variable_subscribe("L:C208_MFD_SOFTKEY_12_PULSE", "Number", function(v)
+    if v == nil then return end
+    if (v ~= 0 and v ~= false) and not C208_SOFTKEY12_BUSY then
+        C208_SOFTKEY12_BUSY = true
+        print("SOFTKEY 12 (EXTERNAL PULSE) -> panel sync only")
+        c208_sync_panel_visibility_only()
+
+        if fsx_variable_write then
+            pcall(fsx_variable_write, "L:C208_MFD_SOFTKEY_12_PULSE", "Number", 0)
+        end
+
+        timer_start(50, function()
+            C208_SOFTKEY12_BUSY = false
+        end)
+    end
+end)
+
+fsx_variable_subscribe("L:C208_REVERSIONARY_PULSE", "Number", function(v)
+    if v == nil then return end
+    if (v ~= 0 and v ~= false) and not C208_REVERSIONARY_BUSY then
+        C208_REVERSIONARY_BUSY = true
+        print("REVERSIONARY (EXTERNAL PULSE) -> panel sync only")
+        c208_sync_reversionary_panel_only()
+
+        if fsx_variable_write then
+            pcall(fsx_variable_write, "L:C208_REVERSIONARY_PULSE", "Number", 0)
+        end
+
+        timer_start(50, function()
+            C208_REVERSIONARY_BUSY = false
+        end)
+    end
+end)
 
 --=============================================================================
 -- HARDWARE SWITCH SUBSCRIPTIONS (Manual overrides for physical panels)
@@ -2816,3 +2873,285 @@ fsx_variable_subscribe("L:ASD_SWITCH_FIRE_DETECT_CE208EX", "Number", function(v)
         pcall(fsx_variable_write, "L:C208_TEST_FIRE", "Number", v == 1 and 1 or 0)
     end
 end)    
+
+
+--=============================================================================
+-- CONSUMER-BASED ELECTRICAL OVERRIDE (MERGED INTO FULL UI FILE)
+-- Preserves overlay / panel visibility / gauge UI from side_panel_working.txt
+--=============================================================================
+local function c208_safe_num(v)
+    v = tonumber(v) or 0
+    if v ~= v or v == math.huge or v == -math.huge then
+        return 0
+    end
+    return v
+end
+
+current_gen_amps = current_gen_amps or 0
+current_alt_amps = current_alt_amps or 0
+
+local C208_ELEC = {
+    avionics_on = false,
+    fuel_boost_switch_on = false,
+    fuel_boost_actual_on = false,
+}
+
+local C208_CONSUMERS = {
+    { name = "Beacon",          simvar = "LIGHT BEACON",              unit = "Bool",   amps = 1 },
+    { name = "Landing Left",    simvar = "LIGHT LANDING",             unit = "Bool",   amps = 6 },
+    { name = "Landing Right",   simvar = "LIGHT LANDING",             unit = "Bool",   amps = 6 },
+    { name = "Taxi",            simvar = "LIGHT TAXI",                unit = "Bool",   amps = 4 },
+    { name = "Strobe",          simvar = "LIGHT STROBE",              unit = "Bool",   amps = 2 },
+    { name = "Nav",             simvar = "LIGHT NAV",                 unit = "Bool",   amps = 1 },
+    { name = "Cabin",           simvar = "LIGHT CABIN",               unit = "Bool",   amps = 2 },
+    { name = "Avionics 1",      simvar = "L:ASD_SWITCH_AVIONICS_N01", unit = "Number", amps = 13, nonzero_on = true, role = "avionics" },
+    { name = "Avionics 2",      simvar = "L:ASD_SWITCH_AVIONICS_N02", unit = "Number", amps = 15, nonzero_on = true, role = "avionics" },
+    { name = "Anti-Ice Wing",   simvar = "LIGHT WING",                unit = "Bool",   amps = 4 },
+    { name = "Stall Heat",      simvar = "PITOT HEAT",                unit = "Bool",   amps = 10 },
+    { name = "Windshield Heat", simvar = "L:WINDSHIELD_HEAT",         unit = "Number", amps = 25, nonzero_on = true },
+    -- Use ACTUAL pump state for electrical load so NORM behaves correctly with existing fuel logic.
+    { name = "Fuel Boost",      simvar = "GENERAL ENG FUEL PUMP ON:1", unit = "Bool",  amps = 4, role = "fuel_boost_actual" },
+    { name = "Starter",         simvar = "GENERAL ENG STARTER:1",      unit = "Bool",  amps = 200, role = "starter" },
+}
+
+local c208_consumer_on = {}
+for i = 1, #C208_CONSUMERS do
+    c208_consumer_on[i] = false
+end
+
+local function c208_get_system_load_amps()
+    local total = 0
+    for i = 1, #C208_CONSUMERS do
+        if c208_consumer_on[i] then
+            total = total + c208_safe_num(C208_CONSUMERS[i].amps)
+        end
+    end
+    return total
+end
+
+local function c208_recompute_derived_states()
+    C208_ELEC.avionics_on = false
+    for i = 1, #C208_CONSUMERS do
+        if c208_consumer_on[i] then
+            local role = C208_CONSUMERS[i].role
+            if role == "avionics" then
+                C208_ELEC.avionics_on = true
+            elseif role == "fuel_boost_actual" then
+                C208_ELEC.fuel_boost_actual_on = true
+            end
+        end
+    end
+end
+
+local function c208_update_electrical_display(volts, bat_amps, gen_amps, alt_amps)
+    current_bus_volts = c208_safe_num(volts)
+    current_bat_amps = c208_safe_num(bat_amps)
+    current_gen_amps = c208_safe_num(gen_amps)
+    current_alt_amps = c208_safe_num(alt_amps)
+
+    if overlay_visible then
+        if txt_overlay_gen_amps_val then txt_set(txt_overlay_gen_amps_val, string.format("%.0f", current_gen_amps)) end
+        if txt_overlay_alt_amps_val then txt_set(txt_overlay_alt_amps_val, string.format("%.0f", current_alt_amps)) end
+        if txt_overlay_bat_amps_val then txt_set(txt_overlay_bat_amps_val, string.format("%.0f", current_bat_amps)) end
+        if txt_overlay_bus_volts_val then txt_set(txt_overlay_bus_volts_val, string.format("%.1f", current_bus_volts)) end
+        if txt_bat_amps then txt_set(txt_bat_amps, "") end
+        if txt_bus_volts then txt_set(txt_bus_volts, "") end
+    else
+        if txt_bat_amps then txt_set(txt_bat_amps, string.format("%.0f", current_bat_amps)) end
+        if txt_bus_volts then txt_set(txt_bus_volts, string.format("%.1f", current_bus_volts)) end
+    end
+end
+
+function calculate_electrical_system()
+    c208_recompute_derived_states()
+
+    local total_load = c208_get_system_load_amps()
+    local volts = 0
+    local bat_amps = 0
+    local gen_amps = 0
+    local alt_amps = 0
+    local ng = c208_safe_num(live_ng_value)
+
+    -- Use existing side-panel states so UI/CAS logic stays intact.
+    local gen_contact_on = (generator_switch_on == true)
+    local gen_command_on = (generator_switch_on == true)
+    local stby_switch_on = (standby_power_switch_on == true or alt_switch_on == true)
+
+    local gen_online = battery_switch_on and gen_command_on and gen_contact_on and (ng >= 46)
+    local stby_armed = battery_switch_on and stby_switch_on
+    local stby_active = stby_armed and (not gen_online)
+    local phase = "Unknown"
+
+    if not battery_switch_on then
+        phase = "Battery OFF"
+        volts = 0
+        bat_amps = 0
+        gen_amps = 0
+        alt_amps = 0
+
+    elseif starter_switch_on and ng < 46 then
+        if ng < 12 then
+            phase = "Starter Engaged"
+            volts = 18.0 + ((ng / 12.0) * 4.0)
+            bat_amps = -total_load - 5
+        else
+            phase = "Light-off / Ng Rising"
+            volts = 20.0 + (((ng - 12.0) / 34.0) * 4.0)
+            bat_amps = -total_load + 50
+        end
+
+    elseif gen_online then
+        if ng < 52 then
+            phase = "Starter OFF (GEN comes online)"
+            volts = 28.0 + (((ng - 46.0) / 6.0) * 0.5)
+            bat_amps = 30
+            gen_amps = bat_amps + total_load + 5
+        elseif ng < 65 then
+            phase = "Stabilized Idle"
+            volts = 28.0
+            bat_amps = 10
+            gen_amps = bat_amps + total_load + 5
+        else
+            phase = "Normal - other consumers"
+            volts = 28.0
+            bat_amps = 2
+            gen_amps = bat_amps + total_load + 5
+        end
+
+    elseif stby_active then
+        phase = "Standby Power Active"
+        volts = 27.0
+        alt_amps = total_load + 5
+        if alt_amps > 75 then
+            bat_amps = -(alt_amps - 75)
+            alt_amps = 75
+        else
+            bat_amps = 0
+        end
+
+    elseif gen_command_on and gen_contact_on and ng < 46 then
+        phase = "GEN Armed / Below Cut-in"
+        if C208_ELEC.avionics_on then
+            volts = var_cap(23.5 - (total_load * 0.05), 22.0, 23.5)
+        else
+            volts = var_cap(24.5 - (total_load * 0.05), 23.5, 24.5)
+        end
+        bat_amps = -total_load - 5
+
+    elseif stby_switch_on and (not gen_online) then
+        phase = "Standby Armed / Battery Feeding"
+        if C208_ELEC.avionics_on then
+            volts = var_cap(23.5 - (total_load * 0.05), 22.0, 23.5)
+        else
+            volts = var_cap(24.5 - (total_load * 0.05), 23.5, 24.5)
+        end
+        bat_amps = -total_load - 5
+
+    else
+        local voltage_sag = (total_load / 100.0) * 2.0
+        if ng >= 65 then
+            phase = "GEN Failure (Battery Only)"
+            volts = var_cap(24.0 - voltage_sag, 22.0, 24.0)
+            bat_amps = -total_load - 5
+        else
+            if C208_ELEC.avionics_on then
+                phase = "Avionics ON"
+                volts = var_cap(23.5 - voltage_sag, 22.0, 23.5)
+            else
+                phase = "Battery ON (pre-start)"
+                volts = var_cap(24.5 - voltage_sag, 23.5, 24.5)
+            end
+            bat_amps = -total_load - 5
+        end
+    end
+
+    volts = c208_safe_num(volts)
+    bat_amps = c208_safe_num(bat_amps)
+    gen_amps = c208_safe_num(gen_amps)
+    alt_amps = c208_safe_num(alt_amps)
+    total_load = c208_safe_num(total_load)
+
+    c208_update_electrical_display(volts, bat_amps, gen_amps, alt_amps)
+
+    if fsx_variable_write then
+        pcall(fsx_variable_write, "L:BUS_VOLTS", "Volts", volts)
+        pcall(fsx_variable_write, "L:BAT_AMPS", "Amperes", bat_amps)
+        pcall(fsx_variable_write, "L:GEN_AMPS", "Amperes", gen_amps)
+        pcall(fsx_variable_write, "L:ALT_AMPS", "Amperes", alt_amps)
+        pcall(fsx_variable_write, "L:C208_TOTAL_LOAD", "Amperes", total_load)
+        pcall(fsx_variable_write, "L:GEN_ONLINE", "Number", gen_online and 1 or 0)
+        pcall(fsx_variable_write, "L:ALT_ONLINE", "Number", stby_active and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_GEN_CONTACT_ON", "Number", gen_contact_on and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_GEN_AVAILABLE", "Number", gen_online and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_STBY_PWR_ARMED", "Number", stby_armed and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_STBY_PWR_ACTIVE", "Number", stby_active and 1 or 0)
+        pcall(fsx_variable_write, "L:C208_STBY_BUS_VOLTAGE", "Volts", stby_active and 27.0 or 0.0)
+    end
+
+    print(string.format(
+        "[CONSUMER ELECTRICAL OVERRIDE] Phase:%s | Ng:%.1f | Load:%.0f | V:%.1f | BAT:%.0f | GEN:%.0f | ALT:%.0f",
+        phase, ng, total_load, volts, bat_amps, gen_amps, alt_amps
+    ))
+end
+
+-- Override the old fictitious electrical function so all existing triggers/UI keep working.
+function apply_light_load_to_electrical()
+    calculate_electrical_system()
+end
+
+for i = 1, #C208_CONSUMERS do
+    local simvar = C208_CONSUMERS[i].simvar
+    local unit = C208_CONSUMERS[i].unit
+    fsx_variable_subscribe(simvar, unit, function(v)
+        if v == nil then return end
+
+        local state = false
+        if unit == "Bool" then
+            state = (v == true or v == 1)
+        elseif C208_CONSUMERS[i].nonzero_on then
+            state = (c208_safe_num(v) ~= 0)
+        else
+            state = (v == 1)
+        end
+
+        c208_consumer_on[i] = state
+        if C208_CONSUMERS[i].role == "fuel_boost_actual" then
+            C208_ELEC.fuel_boost_actual_on = state
+        end
+        calculate_electrical_system()
+    end)
+end
+
+-- Explicit triggers for states that the base UI tracks but did not always recalculate on.
+fsx_variable_subscribe("L:ASD_SWITCH_STBY_POWER_CE208EX", "Number", function(v)
+    if v == nil then return end
+    standby_power_switch_on = (c208_safe_num(v) ~= 0)
+    calculate_electrical_system()
+end)
+
+fsx_variable_subscribe("L:C208_BATTERY_SWITCH", "Number", function(v)
+    if v == nil then return end
+    battery_switch_on = (c208_safe_num(v) ~= 0)
+    calculate_electrical_system()
+end)
+
+fsx_variable_subscribe("L:ASD_SWITCH_GENERATOR_POWER", "Number", function(v)
+    if v == nil then return end
+    generator_switch_on = (c208_safe_num(v) > 0)
+    calculate_electrical_system()
+end)
+
+fsx_variable_subscribe("TURB ENG N1:1", "Percent", function(v)
+    if v == nil or v ~= v then return end
+    live_ng_value = v
+    calculate_electrical_system()
+end)
+
+-- One final initialization after the full script has loaded.
+if timer_start then
+    timer_start(250, function()
+        calculate_electrical_system()
+    end)
+else
+    calculate_electrical_system()
+end
